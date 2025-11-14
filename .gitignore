@@ -213,4 +213,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Configuración de PyCharm
 .idea/
+
+# Cachés de Python
+*.py[cod]
+
+# Modelos entrenados
+models/*.pkl
+models/*.metrics.json
+
+# Datos grandes (opcional, si no quieres subirlos)
+data/*.csv
+
+# Entornos virtuales
+.venv/
