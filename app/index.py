@@ -13,7 +13,13 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
+
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -26,7 +32,7 @@ from sklearn.metrics import (
 # CONFIGURACIÓN GENERAL
 # =========================================================
 st.set_page_config(
-    page_title="Análisis de ACV (Stroke) — Datos limpios",
+    page_title="Análisis de ACV (Stroke) — Modelos comparados",
     layout="wide",
     page_icon="🧠",
 )
@@ -100,8 +106,9 @@ st.markdown(
 # =========================================================
 BASE_DIR = Path(__file__).resolve().parent
 
-# Usamos SIEMPRE el dataset limpio exportado desde el notebook
-DATA_PATH = BASE_DIR.parent / "notebooks" / "data" / "stroke_clean.csv"
+# Dataset limpio si existe, si no, dataset original
+CLEAN_PATH = BASE_DIR.parent / "notebooks" / "data" / "stroke_clean.csv"
+RAW_PATH = BASE_DIR.parent / "data" / "healthcare-dataset-stroke-data.csv"
 
 IMAGE1 = BASE_DIR / "acv.jpg"
 IMAGE2 = BASE_DIR / "acv2.jpg"
@@ -109,67 +116,79 @@ IMAGE3 = BASE_DIR / "acv3.jpg"
 IMAGE4 = BASE_DIR / "acv4.jpg"
 
 
+# =========================================================
+# CARGA Y LIMPIEZA DE DATOS
+# =========================================================
 @st.cache_data
-def load_data(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path)
+def load_clean_data():
+    """
+    Devuelve:
+      - df limpio listo para modelar
+      - texto explicando de dónde se cargó
+    """
+    if CLEAN_PATH.exists():
+        df = pd.read_csv(CLEAN_PATH)
+        source = f"Archivo limpio: {CLEAN_PATH.name} (notebooks/data)"
+    else:
+        if not RAW_PATH.exists():
+            raise FileNotFoundError(
+                f"No se encontró ni {CLEAN_PATH} ni {RAW_PATH}"
+            )
+        df = pd.read_csv(RAW_PATH)
+        source = f"Archivo crudo: {RAW_PATH.name} (data) — limpieza aplicada en la app"
 
+        # === LIMPIEZA BÁSICA ===
+        df = df.drop_duplicates()
 
-# =========================================================
-# CARGA DE DATOS LIMPIOS
-# =========================================================
-if not DATA_PATH.exists():
-    st.error(
-        f"❌ No se encontró el archivo limpio `stroke_clean.csv`.\n\n"
-        f"Se esperaba en:\n`{DATA_PATH}`"
-    )
-    st.stop()
+        for col in ["age", "avg_glucose_level", "bmi"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if "age" in df.columns:
+            df = df[df["age"] >= 0]
+
+        if "bmi" in df.columns:
+            df["bmi"] = df["bmi"].fillna(df["bmi"].median())
+
+        df = df.dropna(subset=["stroke"])
+
+        num_cols = df.select_dtypes(include=["int64", "float64"]).columns
+        df[num_cols] = df[num_cols].fillna(df[num_cols].median(numeric_only=True))
+
+    # === Mapeo de la variable objetivo a 0 / 1 (por si viene como texto) ===
+    if not np.issubdtype(df["stroke"].dtype, np.number):
+        df["stroke"] = df["stroke"].replace(
+            {
+                "Sin ataque": 0,
+                "Ataque": 1,
+                "No": 0,
+                "Yes": 1,
+                "NO": 0,
+                "SI": 1,
+                "Si": 1,
+                "0": 0,
+                "1": 1,
+            }
+        )
+
+    df["stroke"] = df["stroke"].astype(int)
+
+    # 🔥 TODAS LAS CATEGÓRICAS A STRING PURO
+    cat_cols = df.select_dtypes(exclude=["int64", "float64", "bool"]).columns
+    df[cat_cols] = df[cat_cols].astype(str).fillna("Desconocido")
+
+    return df, source
+
 
 try:
-    df = load_data(DATA_PATH)
+    df, data_source = load_clean_data()
 except Exception as e:
-    st.error("Ocurrió un error al cargar los datos limpios:")
+    st.error("No se pudieron cargar los datos:")
     st.exception(e)
-    st.stop()
-
-if "stroke" not in df.columns:
-    st.error("El dataset limpio no tiene la columna 'stroke'. Revisa el archivo.")
-    st.write("Columnas encontradas:", list(df.columns))
     st.stop()
 
 df_viz = df.copy()
 df_viz["stroke_label"] = df_viz["stroke"].map({0: "Sin ataque", 1: "Ataque"})
-
-# =========================================================
-# FUNCIÓN AUXILIAR PARA BOXPLOT SIN ERRORES
-# =========================================================
-def boxplot_matplotlib_by_stroke(ax, df_in: pd.DataFrame, y_col: str, ylabel: str):
-    """
-    Hace un boxplot manual con matplotlib (sin seaborn) para evitar errores
-    raros de seaborn cuando las posiciones o las estadísticas no coinciden.
-    """
-    data = df_in[["stroke_label", y_col]].dropna()
-    if data.empty:
-        ax.text(0.5, 0.5, "No hay datos suficientes", ha="center", va="center")
-        ax.set_axis_off()
-        return
-
-    grupos = []
-    etiquetas = []
-    for label in data["stroke_label"].unique():
-        vals = data.loc[data["stroke_label"] == label, y_col].values
-        if len(vals) > 0:
-            grupos.append(vals)
-            etiquetas.append(label)
-
-    if len(grupos) == 0:
-        ax.text(0.5, 0.5, "Sin datos para graficar", ha="center", va="center")
-        ax.set_axis_off()
-        return
-
-    ax.boxplot(grupos, labels=etiquetas)
-    ax.set_xlabel("ACV")
-    ax.set_ylabel(ylabel)
-
 
 # =========================================================
 # SIDEBAR
@@ -183,12 +202,16 @@ with st.sidebar:
         **✨ Yeimy Valentina Sánchez**  
         **✨ Darikson Pérez**
 
-        Utilizando datos clínicos limpios y balanceados para
-        analizar el riesgo de Accidente Cerebrovascular (ACV).
+        Utilizando datos clínicos limpios y, en el estudio original,
+        balanceados con SMOTE para analizar el riesgo de ACV.
         """
     )
     st.markdown("---")
-    st.caption("Ciencia de Datos en Salud • Streamlit • RandomForest")
+    st.markdown(
+        f"📁 Datos cargados desde:<br><code>{data_source}</code>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Ciencia de Datos en Salud • Streamlit • RandomForest y otros modelos")
 
 # =========================================================
 # PORTADA
@@ -203,11 +226,11 @@ with c1:
     st.markdown(
         """
         <p class="subtitle">
-        Este panel interactivo se basa en un dataset <b>previamente limpiado y balanceado</b> 
-        (<code>stroke_clean.csv</code>), donde se han tratado valores atípicos, nulos y se ha
-        equilibrado la variable objetivo <b>stroke</b>.  
-        El objetivo es explorar los datos, visualizar patrones y construir un modelo de 
-        <b>Machine Learning (RandomForest)</b> para estimar el riesgo de ACV.
+        Este panel interactivo resume el proceso de análisis y modelado realizado
+        sobre un conjunto de datos de pacientes, utilizando un dataset
+        <b>previamente limpiado</b> (y balanceado con SMOTE en el cuadernillo original).
+        Aquí comparamos varios modelos de clasificación y, finalmente, nos enfocamos
+        en el <b>RandomForest</b>, que resultó ser el más robusto.
         </p>
         """,
         unsafe_allow_html=True,
@@ -220,8 +243,8 @@ with c1:
         <ul>
             <li>Explorar las características clínicas y demográficas de los pacientes.</li>
             <li>Visualizar la relación entre las variables y la aparición de ACV.</li>
-            <li>Entrenar un modelo predictivo (RandomForest) con datos limpios y balanceados.</li>
-            <li>Permitir una <b>predicción interactiva</b> del riesgo de ACV para un paciente simulado.</li>
+            <li>Comparar varios modelos de Machine Learning.</li>
+            <li>Seleccionar y analizar con detalle <b>RandomForest</b> como modelo final.</li>
         </ul>
         </div>
         """,
@@ -230,11 +253,11 @@ with c1:
 
     st.markdown(
         """
-        <span class="pill">Datos limpios</span>
-        <span class="pill">SMOTE</span>
+        <span class="pill">Regresión Logística</span>
+        <span class="pill">KNN</span>
+        <span class="pill">SVM</span>
+        <span class="pill">Árbol de decisión</span>
         <span class="pill">RandomForest</span>
-        <span class="pill">Predicción de riesgo</span>
-        <span class="pill">Salud</span>
         """,
         unsafe_allow_html=True,
     )
@@ -242,8 +265,9 @@ with c1:
 with c2:
     if IMAGE1.exists():
         st.image(str(IMAGE1), caption="Ilustración de ACV", use_column_width=True)
+
     st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.markdown("**📊 Resumen de stroke_clean.csv**")
+    st.markdown("**📊 Resumen del dataset utilizado**")
     st.write(f"Filas: **{df.shape[0]}**")
     st.write(f"Columnas: **{df.shape[1]}**")
     st.write("Variable objetivo: **stroke** (0 = Sin ataque, 1 = Ataque)")
@@ -254,11 +278,11 @@ st.markdown("---")
 # =========================================================
 # TABS PRINCIPALES
 # =========================================================
-tab_data, tab_eda, tab_model, tab_pred = st.tabs(
+tab_data, tab_eda, tab_modelos, tab_pred = st.tabs(
     [
         "📄 Datos limpios",
         "📊 Análisis Exploratorio",
-        "🤖 Modelo RandomForest",
+        "🤖 Modelos comparados",
         "🎈 Predicción interactiva",
     ]
 )
@@ -298,27 +322,62 @@ with tab_data:
 # TAB 2: EDA
 # =========================================================
 with tab_eda:
-    st.header("📊 Análisis Exploratorio de los datos limpios")
+    st.header("📊 Análisis Exploratorio")
+
+    st.markdown(
+        """
+        Se muestran distribuciones de variables numéricas por presencia de ACV y la
+        frecuencia total de casos.
+        """,
+        unsafe_allow_html=True
+    )
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("#### Edad según presencia de ACV")
+        st.markdown("#### Distribución de edad por ACV")
         fig, ax = plt.subplots()
-        boxplot_matplotlib_by_stroke(ax, df_viz, "age", "Edad")
+        sns.histplot(
+            data=df_viz,
+            x="age",
+            hue="stroke_label",
+            multiple="stack",
+            bins=30,
+            ax=ax,
+        )
+        ax.set_xlabel("Edad")
+        ax.set_ylabel("Conteo")
         st.pyplot(fig)
 
     with col2:
-        st.markdown("#### Glucosa promedio según ACV")
+        st.markdown("#### Distribución de glucosa promedio por ACV")
         fig, ax = plt.subplots()
-        boxplot_matplotlib_by_stroke(ax, df_viz, "avg_glucose_level", "avg_glucose_level")
+        sns.histplot(
+            data=df_viz,
+            x="avg_glucose_level",
+            hue="stroke_label",
+            multiple="stack",
+            bins=30,
+            ax=ax,
+        )
+        ax.set_xlabel("avg_glucose_level")
+        ax.set_ylabel("Conteo")
         st.pyplot(fig)
 
     col3, col4 = st.columns(2)
     with col3:
         if "bmi" in df_viz.columns:
-            st.markdown("#### IMC (bmi) según ACV")
+            st.markdown("#### Distribución de IMC (bmi) por ACV")
             fig, ax = plt.subplots()
-            boxplot_matplotlib_by_stroke(ax, df_viz, "bmi", "bmi")
+            sns.histplot(
+                data=df_viz,
+                x="bmi",
+                hue="stroke_label",
+                multiple="stack",
+                bins=30,
+                ax=ax,
+            )
+            ax.set_xlabel("bmi")
+            ax.set_ylabel("Conteo")
             st.pyplot(fig)
 
     with col4:
@@ -346,7 +405,7 @@ with tab_eda:
 # FUNCIONES DE MODELO
 # =========================================================
 def preparar_datos(df_base: pd.DataFrame):
-    X = df_base.drop(columns=["stroke"], errors="ignore")
+    X = df_base.drop(columns=["stroke", "id"], errors="ignore")
     y = df_base["stroke"]
 
     num_cols = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
@@ -362,111 +421,162 @@ def preparar_datos(df_base: pd.DataFrame):
     return X, y, preprocessor
 
 
-def entrenar_random_forest(X, y, preprocessor):
+def entrenar_varios_modelos(X, y, preprocessor):
+    """
+    Entrena varios modelos con el mismo split y devuelve
+    un diccionario con métricas y objetos entrenados.
+    """
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.3, random_state=42, stratify=y
     )
 
-    rf = RandomForestClassifier(
-        n_estimators=300,
-        random_state=42,
-        class_weight="balanced",
-    )
+    modelos = {
+        "Regresión Logística": LogisticRegression(max_iter=1000),
+        "KNN (k=7)": KNeighborsClassifier(n_neighbors=7),
+        "SVM (RBF)": SVC(kernel="rbf", probability=True),
+        "Árbol de Decisión": DecisionTreeClassifier(
+            random_state=42, class_weight="balanced"
+        ),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=300, random_state=42, class_weight="balanced"
+        ),
+    }
 
-    modelo = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            ("classifier", rf),
-        ]
-    )
+    resultados = {}
 
-    modelo.fit(X_train, y_train)
+    for nombre, clf in modelos.items():
+        pipe = Pipeline(
+            steps=[
+                ("preprocessor", preprocessor),
+                ("classifier", clf),
+            ]
+        )
 
-    y_pred = modelo.predict(X_test)
-    y_proba = modelo.predict_proba(X_test)[:, 1]
+        pipe.fit(X_train, y_train)
+        y_pred = pipe.predict(X_test)
+        y_proba = pipe.predict_proba(X_test)[:, 1]
 
-    return modelo, X_test, y_test, y_pred, y_proba
+        resultados[nombre] = {
+            "modelo": pipe,
+            "accuracy": accuracy_score(y_test, y_pred),
+            "f1": f1_score(y_test, y_pred),
+            "roc_auc": roc_auc_score(y_test, y_proba),
+            "y_test": y_test,
+            "y_pred": y_pred,
+            "y_proba": y_proba,
+        }
 
+    return resultados
 
 # =========================================================
-# TAB 3: MODELO
+# TAB 3: MODELOS COMPARADOS
 # =========================================================
-with tab_model:
-    st.header("🤖 Modelo predictivo — RandomForest (datos limpios)")
+with tab_modelos:
+    st.header("🤖 Comparación de modelos de clasificación")
 
     st.markdown(
         """
-        El modelo utilizado es un <b>RandomForestClassifier</b>, entrenado sobre el dataset
-        limpio y balanceado. Este modelo captura relaciones no lineales y suele ofrecer
-        un mejor rendimiento que modelos lineales simples.
+        En el cuadernillo se probaron varios modelos de Machine Learning para predecir la
+        variable <b>stroke</b>. Aquí comparamos:
+        <ul>
+            <li><b>Regresión Logística</b></li>
+            <li><b>KNN</b></li>
+            <li><b>SVM</b></li>
+            <li><b>Árbol de Decisión</b></li>
+            <li><b>RandomForest</b></li>
+        </ul>
+        Finalmente, el modelo que se toma como <b>modelo final</b> es
+        <b>RandomForest</b>, por su mejor equilibrio general.
         """,
         unsafe_allow_html=True,
     )
 
-    if st.button("🚀 Entrenar modelo RandomForest"):
-        with st.spinner("Entrenando modelo con datos limpios..."):
+    if st.button("🚀 Entrenar y comparar todos los modelos"):
+        with st.spinner("Entrenando modelos..."):
             X, y, preprocessor = preparar_datos(df)
-            modelo, X_test, y_test, y_pred, y_proba = entrenar_random_forest(
-                X, y, preprocessor
+            resultados = entrenar_varios_modelos(X, y, preprocessor)
+
+        st.session_state["model_results"] = resultados
+        st.session_state["rf_model"] = resultados["RandomForest"]["modelo"]
+
+        # === Tabla de métricas ===
+        resumen = []
+        for nombre, res in resultados.items():
+            resumen.append(
+                {
+                    "Modelo": nombre,
+                    "Accuracy": res["accuracy"],
+                    "F1-score": res["f1"],
+                    "ROC-AUC": res["roc_auc"],
+                }
             )
-            st.session_state["rf_model"] = modelo
+        resumen_df = pd.DataFrame(resumen).set_index("Modelo")
 
-        acc = accuracy_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
-        roc = roc_auc_score(y_test, y_proba)
+        st.markdown("### 📈 Resultados globales de todos los modelos")
+        st.dataframe(resumen_df.style.format("{:.3f}"), use_container_width=True)
 
-        st.success("✅ Modelo entrenado correctamente con datos limpios.")
-        st.balloons()  # 🎈 globos al entrenar
+        mejor_nombre = max(resultados, key=lambda m: resultados[m]["roc_auc"])
+        st.success(
+            f"En esta ejecución, el mejor ROC-AUC lo obtiene: **{mejor_nombre}**. "
+            "En el proyecto tomamos **RandomForest** como modelo final."
+        )
+
+        # === Sección específica para RandomForest ===
+        rf_res = resultados["RandomForest"]
+
+        st.markdown("### 🔍 Análisis detallado del modelo final: RandomForest")
 
         c1_m, c2_m, c3_m = st.columns(3)
-        c1_m.metric("Accuracy", f"{acc:.3f}")
-        c2_m.metric("F1-score", f"{f1:.3f}")
-        c3_m.metric("ROC-AUC", f"{roc:.3f}")
+        c1_m.metric("Accuracy RF", f"{rf_res['accuracy']:.3f}")
+        c2_m.metric("F1-score RF", f"{rf_res['f1']:.3f}")
+        c3_m.metric("ROC-AUC RF", f"{rf_res['roc_auc']:.3f}")
 
-        st.markdown("### Matriz de confusión")
+        st.markdown("#### Matriz de confusión — RandomForest")
         fig, ax = plt.subplots()
-        cm = confusion_matrix(y_test, y_pred)
+        cm = confusion_matrix(rf_res["y_test"], rf_res["y_pred"])
         sns.heatmap(cm, annot=True, fmt="d", cmap="rocket", ax=ax)
         ax.set_xlabel("Predicción")
         ax.set_ylabel("Real")
         st.pyplot(fig)
 
-        st.markdown("### Reporte de clasificación")
-        st.text(classification_report(y_test, y_pred))
+        st.markdown("#### Reporte de clasificación — RandomForest")
+        st.text(classification_report(rf_res["y_test"], rf_res["y_pred"]))
 
         if IMAGE4.exists():
             st.image(
                 str(IMAGE4),
-                caption="RandomForest — conjunto de árboles de decisión",
+                caption="RandomForest — modelo final seleccionado",
                 use_column_width=True,
             )
+
     else:
-        st.info("Pulsa el botón para entrenar el modelo con RandomForest.")
+        st.info("Pulsa el botón para entrenar y comparar todos los modelos.")
 
 # =========================================================
-# TAB 4: PREDICCIÓN
+# TAB 4: PREDICCIÓN (CON RANDOMFOREST)
 # =========================================================
 with tab_pred:
-    st.header("🎈 Predicción interactiva de riesgo de ACV")
+    st.header("🎈 Predicción interactiva de riesgo de ACV (RandomForest)")
 
     st.markdown(
         """
-        Completa la información del paciente y el modelo entrenado con datos limpios
-        estimará la probabilidad de que sufra un ACV.  
-        Si el riesgo es bajo, 🎈 lanzaremos globos.
+        El modelo utilizado para la predicción final es <b>RandomForest</b>, 
+        el mejor modelo según el estudio.  
+        Completa la información del paciente y estima su probabilidad de ACV.
         """,
         unsafe_allow_html=True,
     )
 
     if "rf_model" not in st.session_state:
         st.warning(
-            "Primero debes entrenar el modelo en la pestaña "
-            "'🤖 Modelo RandomForest'."
+            "Primero debes entrenar los modelos en la pestaña "
+            "'🤖 Modelos comparados'."
         )
         st.stop()
 
-    modelo = st.session_state["rf_model"]
+    modelo_rf = st.session_state["rf_model"]
 
+    # -------- Formularios de entrada --------
     col_izq, col_der = st.columns(2)
 
     with col_izq:
@@ -479,9 +589,9 @@ with tab_pred:
         )
         bmi = st.slider(
             "IMC (bmi)",
-            float(df["bmi"].min()),
-            float(df["bmi"].max()),
-            float(df["bmi"].median()),
+            float(df["bmi"].min()) if "bmi" in df.columns else 10.0,
+            float(df["bmi"].max()) if "bmi" in df.columns else 60.0,
+            float(df["bmi"].median()) if "bmi" in df.columns else 25.0,
         )
         hypertension = st.selectbox("Hipertensión", options=[0, 1])
         heart_disease = st.selectbox("Enfermedad cardiaca", options=[0, 1])
@@ -497,29 +607,44 @@ with tab_pred:
             "Estado de fumador", df["smoking_status"].unique()
         )
 
-    input_df = pd.DataFrame(
-        [
-            {
-                "age": age,
-                "avg_glucose_level": avg_glucose_level,
-                "bmi": bmi,
-                "hypertension": hypertension,
-                "heart_disease": heart_disease,
-                "gender": gender,
-                "ever_married": ever_married,
-                "work_type": work_type,
-                "Residence_type": residence_type,
-                "smoking_status": smoking_status,
-            }
-        ]
-    )
+    # -------- Construimos fila de predicción con MISMAS columnas que X --------
+    X_base, _, _ = preparar_datos(df)
+    feature_cols = X_base.columns
 
-    st.markdown("#### Vista previa de los datos del paciente")
+    # valores por defecto (mediana para numéricos, moda para categóricos)
+    fila = {}
+    for col in feature_cols:
+        serie = df[col]
+        if np.issubdtype(serie.dtype, np.number):
+            fila[col] = float(serie.median())
+        else:
+            fila[col] = serie.mode().iloc[0]
+
+    # sobrescribimos con lo que ingresó el usuario
+    overrides = {
+        "age": age,
+        "avg_glucose_level": avg_glucose_level,
+        "bmi": bmi,
+        "hypertension": hypertension,
+        "heart_disease": heart_disease,
+        "gender": gender,
+        "ever_married": ever_married,
+        "work_type": work_type,
+        "Residence_type": residence_type,
+        "smoking_status": smoking_status,
+    }
+    for k, v in overrides.items():
+        if k in fila:
+            fila[k] = v
+
+    input_df = pd.DataFrame([fila], columns=feature_cols)
+
+    st.markdown("#### Vista previa de los datos del paciente (formato modelo)")
     st.dataframe(input_df, use_container_width=True)
 
     if st.button("🔍 Calcular riesgo de ACV"):
-        proba = modelo.predict_proba(input_df)[0, 1]
-        pred = modelo.predict(input_df)[0]
+        proba = modelo_rf.predict_proba(input_df)[0, 1]
+        pred = modelo_rf.predict(input_df)[0]
 
         riesgo_pct = proba * 100
 
@@ -534,13 +659,14 @@ with tab_pred:
         with c2_r:
             if pred == 1:
                 st.error(
-                    "El modelo estima un **alto riesgo de ACV** para este paciente.\n\n"
+                    "El modelo final (RandomForest) estima un **ALTO RIESGO de ACV** "
+                    "para este paciente.\n\n"
                     "Este resultado NO sustituye una evaluación médica real, "
                     "pero sugiere revisar factores de riesgo con un profesional de la salud."
                 )
             else:
                 st.success(
-                    "El modelo estima un **bajo riesgo de ACV** para este paciente "
-                    "según las variables ingresadas."
+                    "El modelo final (RandomForest) estima un **BAJO RIESGO de ACV** "
+                    "para este paciente según las variables ingresadas."
                 )
                 st.balloons()  # 🎈 globos cuando el riesgo es bajo
