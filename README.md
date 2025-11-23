@@ -13,8 +13,6 @@ Se incluye: limpieza del dataset, análisis exploratorio, balanceo de clases, co
 
 - Yeimy Valentina Sánchez  
 - Darikson Pérez  
-Aquí tienes **solo la nota final**, clara, formal y lista para agregar al README:
-
 ---
 
 **Nota:**
